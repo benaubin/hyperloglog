@@ -23,8 +23,6 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 
     g.finish();
 
-    g.bench_function("estimate", f)
-
 }
 
 criterion_group!(benches, criterion_benchmark);

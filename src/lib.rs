@@ -1,4 +1,4 @@
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::{hash::{BuildHasher, Hash, Hasher}};
 
 use bitvec::{field::BitField, prelude::BitArray, vec::BitVec, view::BitViewSized};
 
@@ -25,8 +25,15 @@ impl PackedVec {
     }
 }
 
+
+const RECIP_PRECISION: u32 = 60;
+
 pub struct HyperLogLog<H: BuildHasher> {
     registers: PackedVec,
+
+    reciprical_sum: u128,
+    zero_count: usize,
+
     b: usize,
     l: usize,
     hasher: H,
@@ -54,12 +61,15 @@ where
         Self {
             hasher,
             registers,
+            reciprical_sum: (1u128 << RECIP_PRECISION) * m as u128,
+            zero_count: m,
             b,
             l,
         }
     }
     pub fn add<T: Hash>(&mut self, val: T) {
-        fn inner(registers: &mut PackedVec, b: usize, x: u64) {
+        /// returns (old, new) upon increase
+        fn inner(registers: &mut PackedVec, b: usize, x: u64) -> Option<(u32, u32)> {
             let arr: BitArray<_> = x.into_bitarray();
             let (j, w) = arr.split_at(b);
             let j: usize = j.load_le();
@@ -68,39 +78,43 @@ where
             let prev = registers.get(j);
             if p > prev {
                 registers.set(j, p);
+                Some((prev, p))
+            } else {
+                None
             }
         }
         let mut hasher = self.hasher.build_hasher();
         val.hash(&mut hasher);
         let hash = hasher.finish();
-        inner(&mut self.registers, self.b, hash);
+        if let Some((old, new)) = inner(&mut self.registers, self.b, hash) {
+            let old_recip = 1u64 << RECIP_PRECISION - old;
+            let new_recip = 1u64 << RECIP_PRECISION - new;
+            self.reciprical_sum -= (old_recip - new_recip) as u128;
+            if old == 0 {
+                self.zero_count -= 1;
+            }
+        }
     }
     pub fn cardinality(&self) -> f64 {
-        fn inner(registers: &PackedVec, b: usize, l: usize) -> f64 {
+        fn inner(reciprical_sum: u128, zero_count: usize, b: usize, l: usize) -> f64 {
             let m = 1 << b;
             let m_f64 = m as f64;
+            let max = 2f64.powi(l as i32);
 
-            let z_recip = harmonic_sum_of_powers((0..m).map(|j| registers.get(j) as u8));
-
+            let z_recip = fixed_point_to_floating_point(reciprical_sum, RECIP_PRECISION as i32);
             let a = match m {
                 16 => 0.673,
                 32 => 0.697,
                 64 => 0.709,
                 _ => 0.7213 / (1f64 + 1.079 / m_f64),
             };
-
-            let max = 2f64.powi(l as i32);
-
             let e_unscaled = a / z_recip;
             let e = e_unscaled * m_f64.powi(2); // the “raw” HyperLogLog estimate
 
             if e_unscaled * m_f64 <= 2.5f64 {
                 // small range correction
-                let v = (0..m).filter(|j| registers.get(*j) == 0).count();
-                if v == 0 {
-                    return 0f64;
-                } else if v != 0 {
-                    let u: f64 = (b as f64) - (v as f64).log2(); // u = log(m / V)
+                if zero_count != 0 {
+                    let u: f64 = (b as f64) - (zero_count as f64).log2(); // u = log(m / V)
                     return m_f64 * u;
                 }
             } else if e / max > 30.0 {
@@ -111,7 +125,7 @@ where
             e
         }
 
-        inner(&self.registers, self.b, self.l)
+        inner(self.reciprical_sum, self.zero_count, self.b, self.l)
     }
 }
 
@@ -141,24 +155,6 @@ fn fixed_point_to_floating_point(fixed: u128, ones_place: i32) -> f64 {
     f64::from_bits(e_biased << MANTISSA_BITS | mantissa)
 }
 
-/// calculate the harmonic sum of powers of two.
-///
-/// implemented using 128-bit fixed-point arithmetic to prevent floating point rounding errors
-fn harmonic_sum_of_powers(powers: impl Iterator<Item = u8>) -> f64 {
-    // fixed point, with 64 decimal places
-    let mut fixed_sum: u128 = 0;
-    const FIXED_POINT: i32 = 64;
-
-    for p in powers {
-        let p = p as i32;
-        assert!(p <= FIXED_POINT);
-        let recip = 1 << (FIXED_POINT - p);
-        fixed_sum += recip;
-    }
-
-    fixed_point_to_floating_point(fixed_sum, FIXED_POINT)
-}
-
 #[cfg(test)]
 mod tests {
     use seahash::SeaHasher;
@@ -184,51 +180,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn harmonic_mean() {
-        assert_eq!(harmonic_sum_of_powers([1u8, 1].iter().copied()), 1.0);
-        assert_eq!(
-            harmonic_sum_of_powers([0u8, 2, 2].iter().copied()),
-            3.0 / 2.0
-        );
-
-        let pows = [1u8, 2, 3, 4, 5, 6, 7, 8, 9];
-        // note that this only works when we're within the range of the floating point exponent [2^-10, 2^10]
-        let expected = pows
-            .iter()
-            .map(|pow| (2f64).powi(-(*pow as i32)))
-            .sum::<f64>();
-        assert_eq!(harmonic_sum_of_powers(pows.iter().copied()), expected);
-
-        let pows = [8u8, 8, 8, 1];
-        let expected = pows
-            .iter()
-            .map(|pow| (2f64).powi(-(*pow as i32)))
-            .sum::<f64>();
-        assert_eq!(harmonic_sum_of_powers(pows.iter().copied()), expected);
-
-        let pows = [58u8, 40];
-        let expected = pows
-            .iter()
-            .map(|pow| (2f64).powi(-(*pow as i32)))
-            .sum::<f64>();
-        assert_eq!(harmonic_sum_of_powers(pows.iter().copied()), expected);
-        let pows = [53u8, 40];
-        let expected = pows
-            .iter()
-            .map(|pow| (2f64).powi(-(*pow as i32)))
-            .sum::<f64>();
-        assert_eq!(harmonic_sum_of_powers(pows.iter().copied()), expected);
-
-        for i in 0..=64 {
-            let pows = [i];
-            let expected = pows
-                .iter()
-                .map(|pow| (2f64).powi(-(*pow as i32)))
-                .sum::<f64>();
-            assert_eq!(harmonic_sum_of_powers(pows.iter().copied()), expected);
-        }
-    }
 
     struct BuildHasherClone<H: Hasher + Clone>(H);
     impl<H: Hasher + Clone> BuildHasher for BuildHasherClone<H> {
