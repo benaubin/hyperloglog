@@ -1,8 +1,8 @@
-use std::{hash::{BuildHasher, Hash, Hasher}};
+use std::{hash::{BuildHasher, Hash, Hasher}, sync::atomic::{AtomicU32, Ordering}};
 
 
 struct Registers {
-    words: Box<[u32]>,
+    words: Box<[AtomicU32]>,
     int_size: u32,
 }
 
@@ -12,12 +12,12 @@ impl Registers {
         let ints_per_word = u32::BITS / int_size;
         let words = (len + ints_per_word as usize - 1) / ints_per_word as usize;
         Self {
-            words: vec![0; words].into_boxed_slice(),
+            words: Vec::from_iter(std::iter::repeat_with(|| AtomicU32::new(0)).take(words)).into_boxed_slice(),
             int_size,
         }
     }
     
-    pub fn incr(&mut self, j: u64, p: u32) -> Option<(u32, u32)> {
+    pub fn incr(&self, j: u64, p: u32) -> Option<(u32, u32)> {
         let ints_per_word = (u32::BITS / self.int_size) as u64;
         let word = (j / ints_per_word) as usize;
         let offset = (j % ints_per_word) as u32 * self.int_size;
@@ -25,15 +25,19 @@ impl Registers {
         let mask = (1 << self.int_size) - 1;
         let val = p & mask;
 
-        let old_word = self.words[word];
-        let old_val = (old_word >> offset) & mask;
-        if old_val >= val { return None }
+        let mut old_word = self.words[word].load(Ordering::Relaxed);
 
-        let new_word = (old_word & !(mask << offset)) | (val << offset);
+        loop {
+            let old_val = (old_word >> offset) & mask;
+            if old_val >= val { return None }
 
-        self.words[word] = new_word;
+            let new_word = (old_word & !(mask << offset)) | (val << offset);
 
-        Some((old_val, val))
+            match self.words[word].compare_exchange(old_word, new_word, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return Some((old_val, val)),
+                Err(val) => old_word = val
+            };
+        }
     }
 }
 
