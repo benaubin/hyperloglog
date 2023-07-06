@@ -2,6 +2,10 @@
 
 a concurrent, super fast, fully safe hyperloglog for rust with no dependencies.
 
+on my m1 macbook pro, there is no overhead to concurrency (only uses relaxed ordering), so it is not configurable feature.
+
+you know, concurrency that just works. its pretty magic.
+
 performance:
 
 ```
