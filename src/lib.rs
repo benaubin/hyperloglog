@@ -8,6 +8,7 @@ struct Registers {
     int_size: u32,
 }
 
+/// the bit length of registers
 const REGISTER_SIZE: u8 = 6;
 
 impl Registers {
@@ -57,6 +58,7 @@ impl Registers {
     }
 }
 
+/// fixed-point precision bits used for the reciprocal sum
 const RECIP_PRECISION: u32 = 47;
 
 /// A hyperloglog data structure, allowing count-distinct with limited memory overhead.
