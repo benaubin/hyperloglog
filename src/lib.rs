@@ -1,5 +1,7 @@
-use std::{hash::{BuildHasher, Hash, Hasher}, sync::atomic::{AtomicU32, Ordering}};
-
+use std::{
+    hash::{BuildHasher, Hash, Hasher},
+    sync::atomic::{AtomicU32, AtomicU64, Ordering},
+};
 
 struct Registers {
     words: Box<[AtomicU32]>,
@@ -12,11 +14,12 @@ impl Registers {
         let ints_per_word = u32::BITS / int_size;
         let words = (len + ints_per_word as usize - 1) / ints_per_word as usize;
         Self {
-            words: Vec::from_iter(std::iter::repeat_with(|| AtomicU32::new(0)).take(words)).into_boxed_slice(),
+            words: Vec::from_iter(std::iter::repeat_with(|| AtomicU32::new(0)).take(words))
+                .into_boxed_slice(),
             int_size,
         }
     }
-    
+
     pub fn incr(&self, j: u64, p: u32) -> Option<(u32, u32)> {
         let ints_per_word = (u32::BITS / self.int_size) as u64;
         let word = (j / ints_per_word) as usize;
@@ -29,20 +32,26 @@ impl Registers {
 
         loop {
             let old_val = (old_word >> offset) & mask;
-            if old_val >= val { return None }
+            if old_val >= val {
+                return None;
+            }
 
             let new_word = (old_word & !(mask << offset)) | (val << offset);
 
-            match self.words[word].compare_exchange(old_word, new_word, Ordering::Relaxed, Ordering::Relaxed) {
+            match self.words[word].compare_exchange(
+                old_word,
+                new_word,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => return Some((old_val, val)),
-                Err(val) => old_word = val
+                Err(val) => old_word = val,
             };
         }
     }
 }
 
-
-const RECIP_PRECISION: u32 = 60;
+const RECIP_PRECISION: u32 = 47;
 
 pub struct HyperLogLog<H: BuildHasher> {
     registers: Registers,
@@ -53,8 +62,8 @@ pub struct HyperLogLog<H: BuildHasher> {
 }
 
 struct Counters {
-    reciprical_sum: u128,
-    zero_count: u64,
+    reciprical_sum: AtomicU64,
+    zero_count: AtomicU64,
 }
 
 impl<H> HyperLogLog<H>
@@ -79,35 +88,39 @@ where
         Self {
             hasher,
             registers,
-            counters: Counters { reciprical_sum: (1u128 << RECIP_PRECISION) * m as u128, zero_count: m as u64 }, b, l
+            counters: Counters {
+                reciprical_sum: AtomicU64::new((1u64 << RECIP_PRECISION) * m as u64),
+                zero_count: AtomicU64::new(m as u64),
+            },
+            b,
+            l,
         }
     }
-    pub fn add<T: Hash>(&mut self, val: T) {
+    pub fn add<T: Hash>(&self, val: T) {
         let mut hasher = self.hasher.build_hasher();
         val.hash(&mut hasher);
         let x = hasher.finish();
 
         let j = x & ((1 << self.b) - 1);
         let p = 1 + x.leading_zeros();
-        
-        if let Some((old, new)) = self.registers.incr(j, p) {
-            let old_recip = 1u64 << RECIP_PRECISION - old;
-            let new_recip = 1u64 << RECIP_PRECISION - new;
 
-            self.counters.reciprical_sum -= (old_recip - new_recip) as u128;
+        if let Some((old, new)) = self.registers.incr(j, p) {
+            let old_recip = 1u64 << RECIP_PRECISION.saturating_sub(old);
+            let new_recip = 1u64 << RECIP_PRECISION.saturating_sub(new);
+
+            self.counters.reciprical_sum.fetch_sub(old_recip - new_recip, Ordering::Relaxed);
             if old == 0 {
-                self.counters.zero_count -= 1;
+                self.counters.zero_count.fetch_sub(1, Ordering::Relaxed);
             }
         }
     }
     pub fn cardinality(&self) -> f64 {
-        fn inner(
-            reciprical_sum: u128,
-            zero_count: u64,
-            b: u8,
-            l: u8
-        ) -> f64 {
-            let max = 2f64.powi(l as i32);
+        fn inner(reciprical_sum: u64, zero_count: u64, b: u8, l: u8) -> f64 {
+            let max = 2f64.powi(match l {
+                32 => 32,
+                64 => RECIP_PRECISION as i32 + b as i32,
+                _ => unreachable!()
+            });
             let m = 1 << b;
             let m_f64 = m as f64;
 
@@ -135,11 +148,16 @@ where
             e
         }
 
-        inner(self.counters.reciprical_sum, self.counters.zero_count, self.b, self.l)
+        inner(
+            self.counters.reciprical_sum.load(Ordering::Relaxed),
+            self.counters.zero_count.load(Ordering::Relaxed),
+            self.b,
+            self.l,
+        )
     }
 }
 
-fn fixed_point_to_floating_point(fixed: u128, ones_place: i32) -> f64 {
+fn fixed_point_to_floating_point(fixed: u64, ones_place: i32) -> f64 {
     const MANTISSA_BITS: i32 = f64::MANTISSA_DIGITS as i32 - 1;
     const MANTISSA_MASK: u64 = 0x000f_ffff_ffff_ffff;
 
@@ -151,7 +169,7 @@ fn fixed_point_to_floating_point(fixed: u128, ones_place: i32) -> f64 {
     // determine the mantissa... we only get to keep the 53 most significant digits.
     // we can assume that the floating point number is not zero
     // align the first 1 bit to be the hidden bit
-    let shift = (u128::BITS - f64::MANTISSA_DIGITS) as i32 - fixed.leading_zeros() as i32;
+    let shift = (u64::BITS - f64::MANTISSA_DIGITS) as i32 - fixed.leading_zeros() as i32;
     let mantissa = if shift > 0 {
         fixed >> shift
     } else {
@@ -174,22 +192,21 @@ mod tests {
     #[test]
     fn fixed_to_float() {
         for n in [
-            0u128,
+            0u64,
             1,
             0x000f_ffff_ffff_ffff,
             0xffff_ffff_ffff_ffff,
-            0x1000_0000_0000_0000_0000_0000_0000,
-            0x1000_0000_0000_0000_0000_0000_0001,
-            0x1000_0000_0000_1000_0000_0000_0001,
-            0xffff_ffff_ffff_ffff_ffff_ffff,
-            0xabcd_ef12_abcd_ef45_aacc,
+            0x1000_0000_0000,
+            0x1000_0000_0001,
+            0x1000_1000_0001,
+            0xffff_ffff_ffff,
+            0xabcd_ef12_abcd_ef45,
         ] {
             let actual = fixed_point_to_floating_point(n, 64);
             let expected = n as f64 / (2.0f64).powi(64);
             assert!(actual - expected < 0.001, "{actual} ≠ {expected}")
         }
     }
-
 
     struct BuildHasherClone<H: Hasher + Clone>(H);
     impl<H: Hasher + Clone> BuildHasher for BuildHasherClone<H> {
