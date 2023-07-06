@@ -43,14 +43,14 @@ const RECIP_PRECISION: u32 = 60;
 pub struct HyperLogLog<H: BuildHasher> {
     registers: Registers,
     counters: Counters,
+    b: u8,
+    l: u8,
     hasher: H,
 }
 
 struct Counters {
     reciprical_sum: u128,
     zero_count: u64,
-    b: u8,
-    l: u8
 }
 
 impl<H> HyperLogLog<H>
@@ -75,7 +75,7 @@ where
         Self {
             hasher,
             registers,
-            counters: Counters { reciprical_sum: (1u128 << RECIP_PRECISION) * m as u128, zero_count: m as u64, b, l }
+            counters: Counters { reciprical_sum: (1u128 << RECIP_PRECISION) * m as u128, zero_count: m as u64 }, b, l
         }
     }
     pub fn add<T: Hash>(&mut self, val: T) {
@@ -83,7 +83,7 @@ where
         val.hash(&mut hasher);
         let x = hasher.finish();
 
-        let j = x & ((1 << self.counters.b) - 1);
+        let j = x & ((1 << self.b) - 1);
         let p = 1 + x.leading_zeros();
         
         if let Some((old, new)) = self.registers.incr(j, p) {
@@ -97,12 +97,17 @@ where
         }
     }
     pub fn cardinality(&self) -> f64 {
-        fn inner(c: &Counters) -> f64 {
-            let max = 2f64.powi(c.l as i32);
-            let m = 1 << c.b;
+        fn inner(
+            reciprical_sum: u128,
+            zero_count: u64,
+            b: u8,
+            l: u8
+        ) -> f64 {
+            let max = 2f64.powi(l as i32);
+            let m = 1 << b;
             let m_f64 = m as f64;
 
-            let z_recip = fixed_point_to_floating_point(c.reciprical_sum, RECIP_PRECISION as i32);
+            let z_recip = fixed_point_to_floating_point(reciprical_sum, RECIP_PRECISION as i32);
             let a = match m {
                 16 => 0.673,
                 32 => 0.697,
@@ -114,8 +119,8 @@ where
 
             if e_unscaled * m_f64 <= 2.5f64 {
                 // small range correction
-                if c.zero_count != 0 {
-                    let u: f64 = (c.b as f64) - (c.zero_count as f64).log2(); // u = log(m / V)
+                if zero_count != 0 {
+                    let u: f64 = (b as f64) - (zero_count as f64).log2(); // u = log(m / V)
                     return m_f64 * u;
                 }
             } else if e / max > 30.0 {
@@ -126,7 +131,7 @@ where
             e
         }
 
-        inner(&self.counters)
+        inner(self.counters.reciprical_sum, self.counters.zero_count, self.b, self.l)
     }
 }
 
