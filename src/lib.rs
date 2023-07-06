@@ -115,6 +115,32 @@ where
     }
 }
 
+fn fixed_point_to_floating_point(fixed: u128, ones_place: i32) -> f64 {
+    const MANTISSA_BITS: i32 = f64::MANTISSA_DIGITS as i32 - 1;
+    const MANTISSA_MASK: u64 = 0x000f_ffff_ffff_ffff;
+
+    // now convert to IEEE floating point:
+    if fixed == 0 {
+        return 0.0;
+    }
+
+    // determine the mantissa... we only get to keep the 53 most significant digits.
+    // we can assume that the floating point number is not zero
+    // align the first 1 bit to be the hidden bit
+    let shift = (u128::BITS - f64::MANTISSA_DIGITS) as i32 - fixed.leading_zeros() as i32;
+    let mantissa = if shift > 0 {
+        fixed >> shift
+    } else {
+        fixed << -shift
+    } as u64
+        & MANTISSA_MASK;
+
+    // reconstruct the floating point
+    let exp = MANTISSA_BITS - ones_place + shift as i32;
+    let e_biased = (exp + 1023) as u64;
+    f64::from_bits(e_biased << MANTISSA_BITS | mantissa)
+}
+
 /// calculate the harmonic sum of powers of two.
 ///
 /// implemented using 128-bit fixed-point arithmetic to prevent floating point rounding errors
@@ -122,7 +148,6 @@ fn harmonic_sum_of_powers(powers: impl Iterator<Item = u8>) -> f64 {
     // fixed point, with 64 decimal places
     let mut fixed_sum: u128 = 0;
     const FIXED_POINT: i32 = 64;
-    const MANTISSA_BITS: i32 = f64::MANTISSA_DIGITS as i32 - 1;
 
     for p in powers {
         let p = p as i32;
@@ -131,26 +156,7 @@ fn harmonic_sum_of_powers(powers: impl Iterator<Item = u8>) -> f64 {
         fixed_sum += recip;
     }
 
-    // now convert to IEEE floating point:
-    if fixed_sum == 0 {
-        return 0.0;
-    }
-
-    // determine the mantissa... we only get to keep the 53 most significant digits.
-    // we can assume that the floating point number is not zero
-    // align the first 1 bit to be the hidden bit
-    let shift = (u128::BITS - f64::MANTISSA_DIGITS) as i32 - fixed_sum.leading_zeros() as i32;
-    let mantissa = if shift > 0 {
-        fixed_sum >> shift
-    } else {
-        fixed_sum << -shift
-    } as u64
-        & 0x000f_ffff_ffff_ffff;
-
-    // reconstruct the floating point
-    let exp = MANTISSA_BITS - FIXED_POINT + shift as i32;
-    let e_biased = (exp + 1023) as u64;
-    f64::from_bits(e_biased << MANTISSA_BITS | mantissa)
+    fixed_point_to_floating_point(fixed_sum, FIXED_POINT)
 }
 
 #[cfg(test)]
@@ -158,6 +164,25 @@ mod tests {
     use seahash::SeaHasher;
 
     use super::*;
+
+    #[test]
+    fn fixed_to_float() {
+        for n in [
+            0u128,
+            1,
+            0x000f_ffff_ffff_ffff,
+            0xffff_ffff_ffff_ffff,
+            0x1000_0000_0000_0000_0000_0000_0000,
+            0x1000_0000_0000_0000_0000_0000_0001,
+            0x1000_0000_0000_1000_0000_0000_0001,
+            0xffff_ffff_ffff_ffff_ffff_ffff,
+            0xabcd_ef12_abcd_ef45_aacc,
+        ] {
+            let actual = fixed_point_to_floating_point(n, 64);
+            let expected = n as f64 / (2.0f64).powi(64);
+            assert!(actual - expected < 0.001, "{actual} ≠ {expected}")
+        }
+    }
 
     #[test]
     fn harmonic_mean() {
