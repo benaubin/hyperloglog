@@ -1,27 +1,39 @@
 use std::{hash::{BuildHasher, Hash, Hasher}};
 
-use bitvec::{field::BitField, vec::BitVec};
 
-struct PackedVec {
-    bits: BitVec,
-    elem_size: usize,
+struct Registers {
+    words: Box<[u32]>,
+    int_size: u32,
 }
 
-impl PackedVec {
-    pub fn new(len: usize, elem_size: usize) -> Self {
-        assert!(1 <= elem_size && elem_size <= 32);
-
+impl Registers {
+    pub fn new(len: usize, int_size: u32) -> Self {
+        assert!(int_size == 5 || int_size == 6);
+        let ints_per_word = u32::BITS / int_size;
+        let words = (len + ints_per_word as usize - 1) / ints_per_word as usize;
         Self {
-            bits: BitVec::repeat(false, len * elem_size),
-            elem_size,
+            words: vec![0; words].into_boxed_slice(),
+            int_size,
         }
     }
-    pub fn get(&self, idx: usize) -> u32 {
-        self.bits[idx * self.elem_size..][..self.elem_size].load_le()
-    }
-    pub fn set(&mut self, idx: usize, val: u32) {
-        let val = val.min((1 << self.elem_size) - 1);
-        self.bits[idx * self.elem_size..][..self.elem_size].store_le(val)
+    
+    pub fn incr(&mut self, j: u64, p: u32) -> Option<(u32, u32)> {
+        let ints_per_word = (u32::BITS / self.int_size) as u64;
+        let word = (j / ints_per_word) as usize;
+        let offset = (j % ints_per_word) as u32 * self.int_size;
+
+        let mask = (1 << self.int_size) - 1;
+        let val = p & mask;
+
+        let old_word = self.words[word];
+        let old_val = (old_word >> offset) & mask;
+        if old_val >= val { return None }
+
+        let new_word = (old_word & !(mask << offset)) | (val << offset);
+
+        self.words[word] = new_word;
+
+        Some((old_val, val))
     }
 }
 
@@ -29,7 +41,7 @@ impl PackedVec {
 const RECIP_PRECISION: u32 = 60;
 
 pub struct HyperLogLog<H: BuildHasher> {
-    registers: PackedVec,
+    registers: Registers,
     counters: Counters,
     hasher: H,
 }
@@ -51,7 +63,7 @@ where
         assert!(l == 32 || l == 64);
 
         let m = 1 << b;
-        let registers = PackedVec::new(
+        let registers = Registers::new(
             m,
             match l {
                 32 => 5,
@@ -67,27 +79,22 @@ where
         }
     }
     pub fn add<T: Hash>(&mut self, val: T) {
-        /// returns (old, new) upon increase
-        fn inner(registers: &mut PackedVec, counters: &mut Counters, x: u64) {
-            let j = (x & ((1 << counters.b) - 1)) as usize;
-            let p = 1 + x.leading_zeros();
-            let prev = registers.get(j);
-            if p > prev {
-                registers.set(j, p);
-
-                let old_recip = 1u64 << RECIP_PRECISION - prev;
-                let new_recip = 1u64 << RECIP_PRECISION - p;
-
-                counters.reciprical_sum -= (old_recip - new_recip) as u128;
-                if prev == 0 {
-                    counters.zero_count -= 1;
-                }
-            }
-        }
         let mut hasher = self.hasher.build_hasher();
         val.hash(&mut hasher);
-        let hash = hasher.finish();
-        inner(&mut self.registers, &mut self.counters, hash);
+        let x = hasher.finish();
+
+        let j = x & ((1 << self.counters.b) - 1);
+        let p = 1 + x.leading_zeros();
+        
+        if let Some((old, new)) = self.registers.incr(j, p) {
+            let old_recip = 1u64 << RECIP_PRECISION - old;
+            let new_recip = 1u64 << RECIP_PRECISION - new;
+
+            self.counters.reciprical_sum -= (old_recip - new_recip) as u128;
+            if old == 0 {
+                self.counters.zero_count -= 1;
+            }
+        }
     }
     pub fn cardinality(&self) -> f64 {
         fn inner(c: &Counters) -> f64 {
