@@ -1,6 +1,6 @@
 use std::{hash::{BuildHasher, Hash, Hasher}};
 
-use bitvec::{field::BitField, prelude::BitArray, vec::BitVec, view::BitViewSized};
+use bitvec::{field::BitField, vec::BitVec};
 
 struct PackedVec {
     bits: BitVec,
@@ -30,13 +30,15 @@ const RECIP_PRECISION: u32 = 60;
 
 pub struct HyperLogLog<H: BuildHasher> {
     registers: PackedVec,
-
-    reciprical_sum: u128,
-    zero_count: usize,
-
-    b: usize,
-    l: usize,
+    counters: Counters,
     hasher: H,
+}
+
+struct Counters {
+    reciprical_sum: u128,
+    zero_count: u64,
+    b: u8,
+    l: u8
 }
 
 impl<H> HyperLogLog<H>
@@ -44,7 +46,7 @@ where
     H: BuildHasher,
 {
     /// parameters: hash function, log_2{number of bins}, length of hash
-    pub fn new(hasher: H, b: usize, l: usize) -> Self {
+    pub fn new(hasher: H, b: u8, l: u8) -> Self {
         assert!(4 <= b && b <= 16);
         assert!(l == 32 || l == 64);
 
@@ -61,47 +63,39 @@ where
         Self {
             hasher,
             registers,
-            reciprical_sum: (1u128 << RECIP_PRECISION) * m as u128,
-            zero_count: m,
-            b,
-            l,
+            counters: Counters { reciprical_sum: (1u128 << RECIP_PRECISION) * m as u128, zero_count: m as u64, b, l }
         }
     }
     pub fn add<T: Hash>(&mut self, val: T) {
         /// returns (old, new) upon increase
-        fn inner(registers: &mut PackedVec, b: usize, x: u64) -> Option<(u32, u32)> {
-            let arr: BitArray<_> = x.into_bitarray();
-            let (j, w) = arr.split_at(b);
-            let j: usize = j.load_le();
-            let p = 1 + w.leading_zeros() as u32;
-
+        fn inner(registers: &mut PackedVec, counters: &mut Counters, x: u64) {
+            let j = (x & ((1 << counters.b) - 1)) as usize;
+            let p = 1 + x.leading_zeros();
             let prev = registers.get(j);
             if p > prev {
                 registers.set(j, p);
-                Some((prev, p))
-            } else {
-                None
+
+                let old_recip = 1u64 << RECIP_PRECISION - prev;
+                let new_recip = 1u64 << RECIP_PRECISION - p;
+
+                counters.reciprical_sum -= (old_recip - new_recip) as u128;
+                if prev == 0 {
+                    counters.zero_count -= 1;
+                }
             }
         }
         let mut hasher = self.hasher.build_hasher();
         val.hash(&mut hasher);
         let hash = hasher.finish();
-        if let Some((old, new)) = inner(&mut self.registers, self.b, hash) {
-            let old_recip = 1u64 << RECIP_PRECISION - old;
-            let new_recip = 1u64 << RECIP_PRECISION - new;
-            self.reciprical_sum -= (old_recip - new_recip) as u128;
-            if old == 0 {
-                self.zero_count -= 1;
-            }
-        }
+        inner(&mut self.registers, &mut self.counters, hash);
     }
     pub fn cardinality(&self) -> f64 {
-        fn inner(reciprical_sum: u128, zero_count: usize, b: usize, l: usize) -> f64 {
-            let m = 1 << b;
+        fn inner(c: &Counters) -> f64 {
+            let max = 2f64.powi(c.l as i32);
+            let m = 1 << c.b;
             let m_f64 = m as f64;
-            let max = 2f64.powi(l as i32);
 
-            let z_recip = fixed_point_to_floating_point(reciprical_sum, RECIP_PRECISION as i32);
+            let z_recip = fixed_point_to_floating_point(c.reciprical_sum, RECIP_PRECISION as i32);
             let a = match m {
                 16 => 0.673,
                 32 => 0.697,
@@ -113,8 +107,8 @@ where
 
             if e_unscaled * m_f64 <= 2.5f64 {
                 // small range correction
-                if zero_count != 0 {
-                    let u: f64 = (b as f64) - (zero_count as f64).log2(); // u = log(m / V)
+                if c.zero_count != 0 {
+                    let u: f64 = (c.b as f64) - (c.zero_count as f64).log2(); // u = log(m / V)
                     return m_f64 * u;
                 }
             } else if e / max > 30.0 {
@@ -125,7 +119,7 @@ where
             e
         }
 
-        inner(self.reciprical_sum, self.zero_count, self.b, self.l)
+        inner(&self.counters)
     }
 }
 
