@@ -8,9 +8,10 @@ struct Registers {
     int_size: u32,
 }
 
+const REGISTER_SIZE: u8 = 6;
+
 impl Registers {
     pub fn new(len: usize, int_size: u32) -> Self {
-        assert!(int_size == 5 || int_size == 6);
         let ints_per_word = u32::BITS / int_size;
         let words = (len + ints_per_word as usize - 1) / ints_per_word as usize;
         Self {
@@ -57,7 +58,6 @@ pub struct HyperLogLog<H: BuildHasher> {
     registers: Registers,
     counters: Counters,
     b: u8,
-    l: u8,
     hasher: H,
 }
 
@@ -70,19 +70,14 @@ impl<H> HyperLogLog<H>
 where
     H: BuildHasher,
 {
-    /// parameters: hash function, log_2{number of bins}, length of hash
-    pub fn new(hasher: H, b: u8, l: u8) -> Self {
+    /// parameters: hash function, log_2{number of bins}
+    pub fn new(hasher: H, b: u8) -> Self {
         assert!(4 <= b && b <= 16);
-        assert!(l == 32 || l == 64);
 
         let m = 1 << b;
         let registers = Registers::new(
             m,
-            match l {
-                32 => 5,
-                64 => 6,
-                _ => unreachable!(),
-            },
+            REGISTER_SIZE as u32
         );
 
         Self {
@@ -93,7 +88,6 @@ where
                 zero_count: AtomicU64::new(m as u64),
             },
             b,
-            l,
         }
     }
     pub fn add<T: Hash>(&self, val: T) {
@@ -115,12 +109,8 @@ where
         }
     }
     pub fn cardinality(&self) -> f64 {
-        fn inner(reciprical_sum: u64, zero_count: u64, b: u8, l: u8) -> f64 {
-            let max = 2f64.powi(match l {
-                32 => 32,
-                64 => RECIP_PRECISION as i32 + b as i32,
-                _ => unreachable!()
-            });
+        fn inner(reciprical_sum: u64, zero_count: u64, b: u8) -> f64 {
+            let max = 2f64.powi(RECIP_PRECISION as i32 + b as i32);
             let m = 1 << b;
             let m_f64 = m as f64;
 
@@ -152,7 +142,6 @@ where
             self.counters.reciprical_sum.load(Ordering::Relaxed),
             self.counters.zero_count.load(Ordering::Relaxed),
             self.b,
-            self.l,
         )
     }
 }
@@ -222,7 +211,7 @@ mod tests {
         let b = 4;
         let m = 1 << b;
         let sterr = 1.04 / (m as f64).sqrt();
-        let mut hll = HyperLogLog::new(BuildHasherClone(SeaHasher::new()), b, 32);
+        let hll = HyperLogLog::new(BuildHasherClone(SeaHasher::new()), b);
         assert_eq!(hll.cardinality(), 0f64);
 
         for n in 1..=10000 {
@@ -246,7 +235,7 @@ mod tests {
         let b = 4;
         let m = 1 << b;
         let sterr = 1.04 / (m as f64).sqrt();
-        let mut hll = HyperLogLog::new(BuildHasherClone(SeaHasher::new()), b, 32);
+        let hll = HyperLogLog::new(BuildHasherClone(SeaHasher::new()), b);
         assert_eq!(hll.cardinality(), 0f64);
 
         for n in 1..=1_000_000 {
@@ -270,7 +259,7 @@ mod tests {
         let b = 8;
         let m = 1 << b;
         let sterr = 1.04 / (m as f64).sqrt();
-        let mut hll = HyperLogLog::new(BuildHasherClone(SeaHasher::new()), b, 32);
+        let hll = HyperLogLog::new(BuildHasherClone(SeaHasher::new()), b);
         assert_eq!(hll.cardinality(), 0f64);
 
         for n in 1..=1_000_000 {
@@ -294,7 +283,7 @@ mod tests {
         let b = 16;
         let m = 1 << b;
         let sterr = 1.04 / (m as f64).sqrt();
-        let mut hll = HyperLogLog::new(BuildHasherClone(SeaHasher::new()), b, 32);
+        let hll = HyperLogLog::new(BuildHasherClone(SeaHasher::new()), b);
         assert_eq!(hll.cardinality(), 0f64);
 
         for n in 1..=1_000_000 {
