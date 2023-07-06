@@ -90,6 +90,12 @@ where
             b,
         }
     }
+
+    pub fn stderr(&self) -> f64 {
+        let m = 1 << self.b;
+        1.04 / (m as f64).sqrt()
+    }
+
     pub fn add<T: Hash>(&self, val: T) {
         let mut hasher = self.hasher.build_hasher();
         val.hash(&mut hasher);

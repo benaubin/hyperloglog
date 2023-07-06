@@ -1,7 +1,7 @@
 
 use std::hash::BuildHasherDefault;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use hyperloglog::HyperLogLog;
 use seahash::SeaHasher;
 
@@ -12,13 +12,13 @@ pub fn criterion_benchmark(c: &mut Criterion) {
 
     g.throughput(criterion::Throughput::Elements(1));
     
-    let mut h = HyperLogLog::new(BuildHasherDefault::<SeaHasher>::default(), 4);
+    let h = HyperLogLog::new(BuildHasherDefault::<SeaHasher>::default(), 4);
     g.bench_function("b: 4", |b| b.iter(|| { h.add(i); i+=1 } ));
 
-    let mut h = HyperLogLog::new(BuildHasherDefault::<SeaHasher>::default(), 8);
+    let h = HyperLogLog::new(BuildHasherDefault::<SeaHasher>::default(), 8);
     g.bench_function("b: 8", |b| b.iter(|| { h.add(i); i+=1 } ));
 
-    let mut h = HyperLogLog::new(BuildHasherDefault::<SeaHasher>::default(), 16);
+    let h = HyperLogLog::new(BuildHasherDefault::<SeaHasher>::default(), 16);
     g.bench_function("b: 16", |b| b.iter(|| { h.add(i); i+=1 } ));
 
     g.finish();
