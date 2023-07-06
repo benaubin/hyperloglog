@@ -21,6 +21,11 @@ impl Registers {
         }
     }
 
+    /// Increment the relevant register, given j and p (terms used in HLL paper).
+    /// 
+    /// Params:
+    /// - j, the index of the register
+    /// - p, `1 + leading zeros`
     pub fn incr(&self, j: u64, p: u32) -> Option<(u32, u32)> {
         let ints_per_word = (u32::BITS / self.int_size) as u64;
         let word = (j / ints_per_word) as usize;
@@ -70,7 +75,9 @@ impl<H> HyperLogLog<H>
 where
     H: BuildHasher,
 {
-    /// parameters: hash function, log_2{number of bins}
+    /// Create a new hyperloglog data structure
+    /// 
+    /// parameters: hasher: hash function, b = log_2{number of bins}
     pub fn new(hasher: H, b: u8) -> Self {
         assert!(4 <= b && b <= 16);
 
@@ -96,6 +103,7 @@ where
         1.04 / (m as f64).sqrt()
     }
 
+    /// Add a value to the count
     pub fn add<T: Hash>(&self, val: T) {
         let mut hasher = self.hasher.build_hasher();
         val.hash(&mut hasher);
@@ -114,6 +122,8 @@ where
             }
         }
     }
+
+    /// Get the cardinality estimate
     pub fn cardinality(&self) -> f64 {
         fn inner(reciprical_sum: u64, zero_count: u64, b: u8) -> f64 {
             let max = 2f64.powi(RECIP_PRECISION as i32 + b as i32);
@@ -152,6 +162,7 @@ where
     }
 }
 
+/// Convert a fixed point number to a floating point number
 fn fixed_point_to_floating_point(fixed: u64, ones_place: i32) -> f64 {
     const MANTISSA_BITS: i32 = f64::MANTISSA_DIGITS as i32 - 1;
     const MANTISSA_MASK: u64 = 0x000f_ffff_ffff_ffff;
