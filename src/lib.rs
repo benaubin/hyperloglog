@@ -59,6 +59,8 @@ impl Registers {
 
 const RECIP_PRECISION: u32 = 47;
 
+/// A hyperloglog data structure, allowing count-distinct with limited memory overhead.
+/// Fully concurrent with relaxed-only ordering and zero-unsafe code.
 pub struct HyperLogLog<H: BuildHasher> {
     registers: Registers,
     counters: Counters,
@@ -98,6 +100,7 @@ where
         }
     }
 
+    /// calculates the standard relative error for the given `b` parameter
     pub fn stderr(&self) -> f64 {
         let m = 1 << self.b;
         1.04 / (m as f64).sqrt()
