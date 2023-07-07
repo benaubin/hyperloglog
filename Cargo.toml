@@ -1,5 +1,5 @@
 [package]
-name = "hll-atomic"
+name = "atomic-hyperloglog"
 description = "thread-safe hyperloglog, with atomics"
 keywords = ["atomic", "non-blocking", "lock-free", "hyperloglog"]
 version = "0.1.0"

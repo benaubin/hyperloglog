@@ -1,3 +1,19 @@
+//! # Atomic HyperLogLog
+//! 
+//! a concurrent, super fast, pretty-well-tested and fully safe hyperloglog for rust with no dependencies.
+//! 
+//! ```
+//!# use std::hash::BuildHasherDefault;
+//!# use seahash::SeaHasher;
+//! use atomic_hyperloglog::HyperLogLog;
+//! let h = HyperLogLog::new(BuildHasherDefault::<SeaHasher>::default(), 12);
+//! for n in 0..10_000 {
+//!     h.add(n);
+//! }
+//! let est = h.cardinality();
+//! assert!(10_000.0 * 0.95 <= est && est <= 10_000.0 * 1.05, "{est}");
+//! ```
+
 use std::{
     hash::{BuildHasher, Hash, Hasher},
     sync::atomic::{AtomicU32, AtomicU64, Ordering},
