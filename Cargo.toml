@@ -1,8 +1,13 @@
 [package]
-name = "hyperloglog"
+name = "hll-atomic"
+description = "thread-safe hyperloglog, with atomics"
+keywords = ["atomic", "non-blocking", "lock-free", "hyperloglog"]
 version = "0.1.0"
 edition = "2021"
-
+license = "MIT"
+repository = "https://github.com/benaubin/hyperloglog"
+homepage = "https://github.com/benaubin/hyperloglog"
+categories = ["concurrency", "data-structures"]
 
 [[bench]]
 name = "simple"
