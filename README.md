@@ -2,11 +2,15 @@
 
 a concurrent, super fast, pretty-well-tested and fully safe hyperloglog for rust with no dependencies.
 
-on my m1 macbook pro, there is no overhead to concurrency (only uses relaxed ordering), so it is not configurable feature.
+counts about ~1 billion elements per second (including time to compute SeaHash) with 16 threads. that's ~8 GiB of hashes 
+**computed and counted** per second, with constant memory overhead (around 3KiB for an error rate of ≤ 1%).
 
-you know, concurrency that just works. its pretty magic.
+the concurrency support is surprisingly really really good. it's effectively zero-cost,
+there's no speed up from removing atomic support, and the speedup is nearly linear in number of cores (on my M1 MacBook Pro).
 
-performance:
+want to read more about the implementation process and how the hyperloglog structure works? i wrote a [Thread](https://www.threads.net/t/CuYj0OzsbZi) on it!
+
+## performance:
 
 ```
 +----+-------------+---------------------+--------------------+--------------------+-------------------------+----------------------+
@@ -38,13 +42,12 @@ performance:
 +----+-------------+---------------------+--------------------+--------------------+-------------------------+----------------------+
 ```
 
-memory usage: 
+## memory usage: 
 
-the number of registers is configurable by b: m = 2^b
+the number of registers is configurable by the parameter b, set so that the number of registers `m = 2^b`
 
-5 registers are stored in 32 bits.
-
-2^b / 5 * 4 gives the bytes of memory used
+the memory layout of this crate stores 5 6-bit registers in every 32 bit word (wasting 2 bits per word to allow for
+easier atomics and better performance). `ceil(m / 5) * 4` gives the bytes of memory used for `m` registers
 
 
 
