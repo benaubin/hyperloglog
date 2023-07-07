@@ -56,6 +56,52 @@ impl Registers {
             };
         }
     }
+
+    /// merge two register sets, modifying self, updating counters as our data changes
+    pub fn merge(&self, other: &Self, counters: &Counters) {
+        assert_eq!(self.int_size, other.int_size);
+        assert_eq!(self.words.len(), other.words.len());
+
+        let ints_per_word = (u32::BITS / self.int_size) as u64;
+        let mask = (1 << self.int_size) - 1;
+
+
+        for w_idx in 0..self.words.len() {
+            let mut old_word = self.words[w_idx].load(Ordering::Relaxed);
+            let (mut reciprocal_adj, mut zero_count_adj);
+            loop {
+                reciprocal_adj = 0;
+                zero_count_adj = 0;
+                let mut their_word = other.words[w_idx].load(Ordering::Relaxed);
+                let mut our_word = old_word;
+                let mut new_word = 0;
+                for i in 0..ints_per_word {
+                    let their_val = their_word & mask;
+                    let our_val = our_word & mask;
+
+                    let new_val = if their_val > our_val {
+                        let old_recip = 1u64 << RECIP_PRECISION.saturating_sub(our_val);
+                        let new_recip = 1u64 << RECIP_PRECISION.saturating_sub(their_val);
+                        reciprocal_adj += old_recip - new_recip;
+                        zero_count_adj += (our_val == 0) as u64;
+                        their_val
+                    } else {
+                        our_val
+                    };
+
+                    new_word |= new_val << i * self.int_size as u64;
+                    their_word = their_word >> self.int_size;
+                    our_word = our_word >> self.int_size;
+                }
+                match self.words[w_idx].compare_exchange(old_word, new_word, Ordering::Relaxed, Ordering::Relaxed) {
+                    Ok(_) => break,
+                    Err(word) => {old_word = word}
+                }
+            }
+            counters.reciprical_sum.fetch_sub(reciprocal_adj, Ordering::Relaxed);
+            counters.zero_count.fetch_sub(zero_count_adj, Ordering::Relaxed);
+        }
+    }
 }
 
 /// fixed-point precision bits used for the reciprocal sum
@@ -126,6 +172,12 @@ where
                 self.counters.zero_count.fetch_sub(1, Ordering::Relaxed);
             }
         }
+    }
+
+    /// merge other's count into self
+    pub fn merge(&self, other: &Self) {
+        assert_eq!(self.b, other.b);
+        self.registers.merge(&other.registers, &self.counters);
     }
 
     /// Get the cardinality estimate
@@ -274,6 +326,65 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn merging_small() {
+        let b = 8;
+        let m = 1 << b;
+        let sterr = 1.04 / (m as f64).sqrt();
+
+        let hll1 = HyperLogLog::new(BuildHasherClone(SeaHasher::new()), b);
+        let hll2 = HyperLogLog::new(BuildHasherClone(SeaHasher::new()), b);
+        let hll3 = HyperLogLog::new(BuildHasherClone(SeaHasher::new()), b);
+
+        hll1.add(1);
+        hll2.add(2);
+        hll3.add(3);
+
+        hll1.merge(&hll2);
+        hll2.merge(&hll3);
+
+        assert_eq!(hll1.cardinality(), hll2.cardinality());
+        assert_ne!(hll2.cardinality(), hll3.cardinality());
+    }
+
+    #[test]
+    fn merging() {
+        let b = 8;
+        let m = 1 << b;
+        let sterr = 1.04 / (m as f64).sqrt();
+
+        let hll1 = HyperLogLog::new(BuildHasherClone(SeaHasher::new()), b);
+        let hll2 = HyperLogLog::new(BuildHasherClone(SeaHasher::new()), b);
+        let hll3 = HyperLogLog::new(BuildHasherClone(SeaHasher::new()), b);
+
+        assert_eq!(hll1.cardinality(), 0f64);
+
+        for n in 1..=1_000_000 {
+            hll1.add(n);
+            hll2.add(n);
+            hll3.add(!n);
+        }
+
+        assert_eq!(hll1.cardinality(), hll2.cardinality());
+        assert_ne!(hll1.cardinality(), hll3.cardinality());
+
+        for n in 1_000_000..=2_000_000 {
+            hll2.add(n);
+        }
+
+        assert_ne!(hll1.cardinality(), hll2.cardinality());
+
+        hll1.merge(&hll2);
+
+        assert_eq!(hll1.cardinality(), hll2.cardinality());
+
+        let expected = hll2.cardinality() + hll3.cardinality();
+        hll2.merge(&hll3);
+        let error = (hll2.cardinality() - expected) / expected;
+        let z = error / (sterr.powi(2) * 2.0).sqrt();
+        assert!(z <= 1.0, "should be within 1 margin of error of difference after merging");
     }
 
     #[test]
